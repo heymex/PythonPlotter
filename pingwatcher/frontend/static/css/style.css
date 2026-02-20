@@ -1,0 +1,290 @@
+/* ====== CSS Custom Properties (Dark theme default) ====== */
+:root {
+  --bg-primary: #0f1923;
+  --bg-secondary: #1a2736;
+  --bg-surface: #223344;
+  --bg-hover: #2a3d50;
+  --text-primary: #e0e8f0;
+  --text-secondary: #8899aa;
+  --text-muted: #556677;
+  --accent: #00b4d8;
+  --accent-hover: #0096c7;
+  --success: #2ecc71;
+  --warning: #f39c12;
+  --danger: #e74c3c;
+  --border: #2a3d50;
+  --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --radius: 6px;
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+[data-theme="light"] {
+  --bg-primary: #f0f2f5;
+  --bg-secondary: #ffffff;
+  --bg-surface: #e8ecf0;
+  --bg-hover: #dde3ea;
+  --text-primary: #1a2736;
+  --text-secondary: #556677;
+  --text-muted: #8899aa;
+  --accent: #0077b6;
+  --accent-hover: #005f96;
+  --border: #ccd5de;
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+/* ====== Reset ====== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+/* ====== Header ====== */
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1.5rem;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.app-header__brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.app-header__icon { font-size: 1.5rem; }
+
+.app-header__title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--accent);
+}
+
+.app-header__nav {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.tab-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  font-weight: 500;
+  padding: 0.5rem 1rem;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.tab-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.tab-btn.active { background: var(--accent); color: #fff; }
+
+.icon-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.4rem 0.6rem;
+  font-size: 1.1rem;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.icon-btn:hover { background: var(--bg-hover); }
+
+/* ====== Target Bar ====== */
+.target-bar {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.75rem 1.5rem;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.target-bar__input,
+.target-bar__select {
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.75rem;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.target-bar__input:focus,
+.target-bar__select:focus {
+  border-color: var(--accent);
+}
+
+.target-bar__input { flex: 1; min-width: 200px; }
+.target-bar__input--label { flex: 0.5; min-width: 120px; }
+
+.btn {
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  font-weight: 600;
+  border: none;
+  border-radius: var(--radius);
+  padding: 0.5rem 1.25rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn--primary {
+  background: var(--accent);
+  color: #fff;
+}
+.btn--primary:hover { background: var(--accent-hover); }
+.btn--primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ====== Target Pills ====== */
+.target-pills {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.5rem 1.5rem;
+  flex-wrap: wrap;
+  min-height: 2.5rem;
+}
+
+.pill {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.3rem 0.5rem 0.3rem 0.85rem;
+  font-size: 0.8rem;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.pill:hover { border-color: var(--accent); }
+.pill.active { border-color: var(--accent); background: var(--accent); color: #fff; }
+
+.pill__remove {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: 1rem;
+  cursor: pointer;
+  line-height: 1;
+  opacity: 0.6;
+}
+.pill__remove:hover { opacity: 1; }
+
+/* ====== Main Content ====== */
+.main-content {
+  padding: 1rem 1.5rem;
+}
+
+.view-panel { display: none; }
+.view-panel.active { display: block; }
+
+.panel-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.trace-notice {
+  background: var(--bg-surface);
+  border-left: 3px solid var(--warning);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+/* ====== Trace Table ====== */
+.trace-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+}
+
+.trace-table th {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.7rem;
+  border-bottom: 2px solid var(--border);
+  white-space: nowrap;
+}
+
+.trace-table td {
+  padding: 0.4rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.trace-table tbody tr:hover { background: var(--bg-hover); }
+
+.col-graph { width: 25%; }
+
+/* Latency bar */
+.latency-bar {
+  height: 14px;
+  border-radius: 3px;
+  min-width: 2px;
+  transition: width 0.3s ease;
+}
+
+/* Color helpers */
+.text-success { color: var(--success); }
+.text-warning { color: var(--warning); }
+.text-danger { color: var(--danger); }
+.text-muted { color: var(--text-muted); }
+
+/* ====== Chart Container ====== */
+.chart-container {
+  width: 100%;
+  min-height: 400px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+/* ====== Empty State ====== */
+.empty-state {
+  text-align: center;
+  padding: 3rem 1rem;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+
+/* ====== Responsive ====== */
+@media (max-width: 768px) {
+  .target-bar { flex-direction: column; }
+  .target-bar__input { min-width: 100%; }
+  .app-header__nav { gap: 0; }
+  .tab-btn { padding: 0.4rem 0.6rem; font-size: 0.8rem; }
+}

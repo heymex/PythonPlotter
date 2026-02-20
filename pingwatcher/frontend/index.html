@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PingWatcher</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" defer></script>
+</head>
+<body>
+  <!-- ====== Header ====== -->
+  <header class="app-header">
+    <div class="app-header__brand">
+      <span class="app-header__icon">📡</span>
+      <h1 class="app-header__title">PingWatcher</h1>
+    </div>
+    <nav class="app-header__nav">
+      <button class="tab-btn active" data-view="trace">Trace Graph</button>
+      <button class="tab-btn" data-view="timeline">Timeline</button>
+      <button class="tab-btn" data-view="summary">Summary</button>
+    </nav>
+    <button id="theme-toggle" class="icon-btn" aria-label="Toggle theme">🌙</button>
+  </header>
+
+  <!-- ====== Target bar ====== -->
+  <section class="target-bar">
+    <input
+      id="target-host"
+      class="target-bar__input"
+      type="text"
+      placeholder="Enter hostname or IP (e.g. 8.8.8.8)"
+      autocomplete="off"
+    />
+    <input
+      id="target-label"
+      class="target-bar__input target-bar__input--label"
+      type="text"
+      placeholder="Label (optional)"
+      autocomplete="off"
+    />
+    <select id="target-interval" class="target-bar__select">
+      <option value="2.5">2.5 s</option>
+      <option value="5">5 s</option>
+      <option value="10">10 s</option>
+      <option value="30">30 s</option>
+      <option value="60">60 s</option>
+    </select>
+    <button id="btn-add-target" class="btn btn--primary">Start Monitoring</button>
+  </section>
+
+  <!-- ====== Target selector pills ====== -->
+  <section id="target-pills" class="target-pills"></section>
+
+  <!-- ====== View panels ====== -->
+  <main class="main-content">
+    <!-- Trace Graph -->
+    <section id="view-trace" class="view-panel active">
+      <div class="panel-toolbar">
+        <label>Focus:
+          <select id="focus-select" class="target-bar__select">
+            <option value="10">10</option>
+            <option value="25">25</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </select>
+        </label>
+      </div>
+      <div class="trace-notice">
+        <em>ℹ Intermediate hop packet loss is often misleading. Routers may deprioritise
+        ICMP Time Exceeded replies. Look at the final hop for the true picture.</em>
+      </div>
+      <table id="trace-table" class="trace-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>IP</th>
+            <th>DNS</th>
+            <th>Avg</th>
+            <th>Min</th>
+            <th>Cur</th>
+            <th>PL%</th>
+            <th class="col-graph">Graph</th>
+          </tr>
+        </thead>
+        <tbody id="trace-tbody"></tbody>
+      </table>
+    </section>
+
+    <!-- Timeline -->
+    <section id="view-timeline" class="view-panel">
+      <div class="panel-toolbar">
+        <label>Hop:
+          <select id="timeline-hop-select" class="target-bar__select">
+            <option value="last">Final hop</option>
+          </select>
+        </label>
+      </div>
+      <div id="timeline-chart" class="chart-container"></div>
+    </section>
+
+    <!-- Summary -->
+    <section id="view-summary" class="view-panel">
+      <table id="summary-table" class="trace-table">
+        <thead>
+          <tr>
+            <th>Target</th>
+            <th>Host</th>
+            <th>Avg</th>
+            <th>Min</th>
+            <th>Cur</th>
+            <th>PL%</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="summary-tbody"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <!-- ====== Scripts ====== -->
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>
