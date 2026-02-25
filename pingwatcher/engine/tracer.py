@@ -181,6 +181,7 @@ def icmp_traceroute(
     max_hops: int = 30,
     timeout: float = 3.0,
     inter_packet_delay: float = 0.025,
+    max_consecutive_timeouts: int = 4,
 ) -> list[dict]:
     """Run a single ICMP traceroute to *target* using per-hop pings.
 
@@ -192,12 +193,15 @@ def icmp_traceroute(
         max_hops: Maximum TTL to send.
         timeout: Per-probe timeout in seconds.
         inter_packet_delay: Pause between successive probes in seconds.
+        max_consecutive_timeouts: End the trace early after this many
+            consecutive hop timeouts.
 
     Returns:
         Ordered list of hop dictionaries.
     """
     target_ip = resolve_target(target)
     hops: list[dict] = []
+    consecutive_timeouts = 0
 
     for ttl in range(1, max_hops + 1):
         result = _send_probe(target, target_ip, ttl, timeout)
@@ -206,6 +210,12 @@ def icmp_traceroute(
 
         if result["ip"] == target_ip:
             break
+        if result["is_timeout"]:
+            consecutive_timeouts += 1
+            if consecutive_timeouts >= max_consecutive_timeouts:
+                break
+        else:
+            consecutive_timeouts = 0
         if inter_packet_delay > 0:
             time.sleep(inter_packet_delay)
 

@@ -1,5 +1,6 @@
 """Tests for :mod:`pingwatcher.engine.scheduler`."""
 
+import socket
 from unittest.mock import MagicMock, patch
 
 from pingwatcher.engine.scheduler import (
@@ -22,6 +23,8 @@ class TestStartStopMonitoring:
         call_kwargs = mock_scheduler.add_job.call_args
         assert call_kwargs.kwargs["id"] == "t1"
         assert call_kwargs.kwargs["seconds"] == 5.0
+        assert call_kwargs.kwargs["coalesce"] is True
+        assert call_kwargs.kwargs["max_instances"] == 32
 
     @patch("pingwatcher.engine.scheduler.scheduler")
     def test_stop_monitoring_removes_job(self, mock_scheduler):
@@ -67,3 +70,35 @@ class TestNotifySubscribers:
     def test_no_subscribers(self):
         """No error when there are no subscribers for a target."""
         _notify_subscribers("t_none", [{"hop": 1}])  # Should not raise.
+
+
+class TestCollectSampleDnsFailure:
+    """Verify repeated DNS failures stop monitoring."""
+
+    @patch("pingwatcher.engine.scheduler.stop_monitoring")
+    @patch("pingwatcher.engine.scheduler._deactivate_target")
+    @patch(
+        "pingwatcher.engine.scheduler.icmp_traceroute",
+        side_effect=socket.gaierror("host lookup failed"),
+    )
+    @patch("pingwatcher.engine.scheduler.get_settings")
+    def test_stops_after_consecutive_dns_failures(
+        self,
+        mock_settings,
+        mock_traceroute,
+        mock_deactivate,
+        mock_stop,
+    ):
+        """After N DNS errors, target is disabled and job is stopped."""
+        from pingwatcher.engine import scheduler as scheduler_mod
+
+        scheduler_mod._dns_failures_by_target.clear()
+        mock_settings.return_value = MagicMock(default_inter_packet_delay=0.0)
+
+        scheduler_mod._collect_sample("target-1", "no-such-host", 30, 1.0)
+        scheduler_mod._collect_sample("target-1", "no-such-host", 30, 1.0)
+        scheduler_mod._collect_sample("target-1", "no-such-host", 30, 1.0)
+
+        assert mock_traceroute.call_count == 3
+        mock_deactivate.assert_called_once_with("target-1")
+        mock_stop.assert_called_once_with("target-1")

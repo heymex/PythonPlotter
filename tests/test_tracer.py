@@ -92,6 +92,22 @@ class TestIcmpTraceroute:
         hops = icmp_traceroute("8.8.8.8", max_hops=3, timeout=1.0, inter_packet_delay=0)
         assert len(hops) == 3
 
+    @patch("pingwatcher.engine.tracer.resolve_target", return_value="8.8.8.8")
+    @patch("pingwatcher.engine.tracer._send_probe")
+    def test_stops_after_consecutive_timeouts(self, mock_probe, mock_resolve):
+        """Trace stops early once timeout streak threshold is reached."""
+        mock_probe.return_value = {
+            "hop": 1, "ip": None, "dns": None, "rtt_ms": None, "is_timeout": True,
+        }
+        hops = icmp_traceroute(
+            "8.8.8.8",
+            max_hops=30,
+            timeout=1.0,
+            inter_packet_delay=0,
+            max_consecutive_timeouts=4,
+        )
+        assert len(hops) == 4
+
 
 class TestParseTracerouteOutput:
     """Verify parsing of system traceroute text."""
