@@ -23,6 +23,7 @@ from pingwatcher.db.queries import (
     get_target,
     get_timeline_data,
 )
+from pingwatcher.engine.scheduler import latest_hop_stats
 
 router = APIRouter(tags=["data"])
 
@@ -51,6 +52,11 @@ def api_hop_stats(
         raise HTTPException(status_code=404, detail="Target not found")
     cfg = get_settings()
     n = focus if focus is not None else cfg.default_focus
+    # Return in-memory cache when requesting the default focus window —
+    # the scheduler keeps this current after every sample, so no DB query
+    # is needed for the common case.
+    if n == cfg.default_focus and target_id in latest_hop_stats:
+        return latest_hop_stats[target_id]
     return get_all_hop_stats(db, target_id, focus_n=n)
 
 

@@ -106,7 +106,12 @@ def check_condition(alert: Alert, all_stats: list[dict[str, Any]]) -> tuple[bool
     return False, None
 
 
-def evaluate_alerts(db: Session, target_id: str, focus_n: int = 10) -> None:
+def evaluate_alerts(
+    db: Session,
+    target_id: str,
+    focus_n: int = 10,
+    all_stats: list[dict[str, Any]] | None = None,
+) -> None:
     """Run all enabled alert rules for a target against current data.
 
     This is called after every sample collection.  It updates the
@@ -118,12 +123,16 @@ def evaluate_alerts(db: Session, target_id: str, focus_n: int = 10) -> None:
         db: Active database session.
         target_id: UUID-style target identifier.
         focus_n: Focus window size for stat computation.
+        all_stats: Pre-computed hop statistics from the current sample
+            cycle.  When supplied the DB query inside this function is
+            skipped entirely, avoiding redundant round-trips.
     """
     alerts = get_active_alerts(db, target_id)
     if not alerts:
         return
 
-    all_stats = get_all_hop_stats(db, target_id, focus_n=focus_n)
+    if all_stats is None:
+        all_stats = get_all_hop_stats(db, target_id, focus_n=focus_n)
 
     for alert in alerts:
         triggered, value = check_condition(alert, all_stats)

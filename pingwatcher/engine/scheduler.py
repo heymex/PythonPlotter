@@ -15,8 +15,10 @@ from typing import Optional
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from pingwatcher.config import get_settings
+from pingwatcher.alerts.conditions import evaluate_alerts
 from pingwatcher.db.models import Sample, SessionLocal, Target
 from pingwatcher.db.queries import (
+    get_all_hop_stats,
     get_last_known_route,
     record_route_change,
     store_sample,
@@ -27,9 +29,14 @@ logger = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler(daemon=True)
 
-# In-memory dict of latest samples per target for WebSocket push.
-# Keyed by target_id; value is the serialised hop list.
+# In-memory dict of latest raw hop list per target for WebSocket push.
+# Keyed by target_id; value is the hop list from the most recent trace.
 latest_results: dict[str, list[dict]] = {}
+
+# In-memory cache of computed hop statistics for the default focus window.
+# Updated after every successful sample; used by the /hops API endpoint to
+# avoid re-querying the database on every request.
+latest_hop_stats: dict[str, list[dict]] = {}
 
 # WebSocket subscribers (managed by the main app module).
 # Maps target_id → set of asyncio.Queue instances.
@@ -40,6 +47,13 @@ ws_subscribers: dict[str, set] = {}
 _MAX_DNS_FAILURES = 3
 _dns_failures_by_target: dict[str, int] = {}
 _target_run_locks: dict[str, threading.Lock] = {}
+
+# In-memory route cache: last known hop-IP list per target.
+# Avoids two DB queries per sample for route-change detection.
+# _route_cache_initialized tracks which targets have been seeded from DB
+# (needed to handle server restarts without missing the first-sample check).
+_last_known_routes: dict[str, list] = {}
+_route_cache_initialized: set[str] = set()
 
 
 def _deactivate_target(target_id: str) -> None:
@@ -114,10 +128,17 @@ def _collect_sample(target_id: str, host: str, max_hops: int, timeout: float) ->
 
         now = datetime.utcnow()
         db = SessionLocal()
+        all_stats = None
         try:
-            # Detect route changes before storing the new sample.
-            old_route = get_last_known_route(db, target_id)
+            # --- Route-change detection (cached; DB only on first run) ---
             new_ips = [h["ip"] for h in hops]
+            if target_id not in _route_cache_initialized:
+                # First sample since startup — seed cache from DB so we
+                # don't lose a real route change that occurred while down.
+                old_route = get_last_known_route(db, target_id)
+                _route_cache_initialized.add(target_id)
+            else:
+                old_route = _last_known_routes.get(target_id)
 
             if old_route is not None and old_route != new_ips:
                 record_route_change(db, target_id, old_route, new_ips)
@@ -141,10 +162,34 @@ def _collect_sample(target_id: str, host: str, max_hops: int, timeout: float) ->
                 for h in hops
             ]
             store_sample(db, samples)
+
+            # Update route cache after the new sample is stored.
+            _last_known_routes[target_id] = new_ips
+
+            # Compute and cache hop statistics for the default focus window.
+            # This lets the /hops API endpoint skip the DB entirely on the
+            # common path (default focus, active target).
+            try:
+                all_stats = get_all_hop_stats(db, target_id, focus_n=cfg.default_focus)
+                latest_hop_stats[target_id] = all_stats
+            except Exception:
+                logger.exception("Failed to cache hop stats for %s", target_id)
+
+            # Evaluate threshold alerts, reusing the stats we just computed
+            # so the alert engine does not issue its own DB queries.
+            try:
+                evaluate_alerts(
+                    db,
+                    target_id,
+                    focus_n=cfg.default_focus,
+                    all_stats=all_stats,
+                )
+            except Exception:
+                logger.exception("Alert evaluation failed for %s", target_id)
         finally:
             db.close()
 
-        # Cache latest result for WebSocket consumers.
+        # Cache latest raw hops for WebSocket consumers.
         latest_results[target_id] = hops
 
         # Push to any connected WebSocket subscribers.
@@ -231,8 +276,11 @@ def stop_monitoring(target_id: str) -> None:
         logger.debug("No active job for %s", target_id)
 
     latest_results.pop(target_id, None)
+    latest_hop_stats.pop(target_id, None)
     _dns_failures_by_target.pop(target_id, None)
     _target_run_locks.pop(target_id, None)
+    _last_known_routes.pop(target_id, None)
+    _route_cache_initialized.discard(target_id)
 
 
 def start_scheduler() -> None:

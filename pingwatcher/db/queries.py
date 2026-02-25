@@ -8,7 +8,9 @@ caller controls transaction scope (typically injected via FastAPI's
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import desc, distinct, func
+from itertools import groupby
+
+from sqlalchemy import desc, distinct, func, text
 from sqlalchemy.orm import Session
 
 from pingwatcher.db.models import (
@@ -167,7 +169,10 @@ def get_all_hop_stats(
     target_id: str,
     focus_n: int = 10,
 ) -> list[dict[str, Any]]:
-    """Return :func:`get_hop_stats` for every hop seen on *target_id*.
+    """Return per-hop statistics for every hop seen on *target_id*.
+
+    Uses a single window-function query to fetch the last *focus_n* rows
+    per hop in one round-trip, replacing the previous N+1 query loop.
 
     Args:
         db: Active database session.
@@ -177,13 +182,55 @@ def get_all_hop_stats(
     Returns:
         List of per-hop stat dictionaries sorted by hop number.
     """
-    hop_numbers = (
-        db.query(distinct(Sample.hop_number))
-        .filter(Sample.target_id == target_id)
-        .order_by(Sample.hop_number)
-        .all()
+    sql = text(
+        """
+        SELECT hop_number, ip, dns, rtt_ms, is_timeout
+        FROM (
+            SELECT hop_number, ip, dns, rtt_ms, is_timeout,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY hop_number ORDER BY sampled_at DESC
+                   ) AS rn
+            FROM samples
+            WHERE target_id = :target_id
+        ) sub
+        WHERE rn <= :focus_n
+        ORDER BY hop_number, rn
+        """
     )
-    return [get_hop_stats(db, target_id, h[0], focus_n) for h in hop_numbers]
+    rows = db.execute(sql, {"target_id": target_id, "focus_n": focus_n}).mappings().fetchall()
+
+    if not rows:
+        return []
+
+    result = []
+    for hop_num, group in groupby(rows, key=lambda r: r["hop_number"]):
+        hop_rows = list(group)
+        valid_rtts = [
+            r["rtt_ms"]
+            for r in hop_rows
+            if not r["is_timeout"] and r["rtt_ms"] is not None
+        ]
+        total = len(hop_rows)
+        lost = sum(1 for r in hop_rows if r["is_timeout"])
+        latest = hop_rows[0]  # rn=1 → most recent
+        cur = (
+            None
+            if (latest["is_timeout"] or latest["rtt_ms"] is None)
+            else round(latest["rtt_ms"], 2)
+        )
+        result.append(
+            {
+                "hop": hop_num,
+                "ip": latest["ip"],
+                "dns": latest["dns"],
+                "avg_ms": round(sum(valid_rtts) / len(valid_rtts), 2) if valid_rtts else None,
+                "min_ms": round(min(valid_rtts), 2) if valid_rtts else None,
+                "max_ms": round(max(valid_rtts), 2) if valid_rtts else None,
+                "cur_ms": cur,
+                "packet_loss_pct": round(lost / total * 100, 1) if total else 0.0,
+            }
+        )
+    return result
 
 
 def get_timeline_data(
