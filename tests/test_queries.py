@@ -2,9 +2,12 @@
 
 from datetime import datetime, timedelta
 
-from pingwatcher.db.models import Alert, Sample, Target
+from pingwatcher.db.models import Alert, Sample, SampleHourly, Target
 from pingwatcher.db.queries import (
+    aggregate_hourly_rollups,
+    backfill_dns_for_ip,
     create_target,
+    delete_raw_samples_older_than,
     delete_target,
     get_active_alerts,
     get_all_hop_stats,
@@ -186,6 +189,28 @@ class TestTimeline:
         data = get_timeline_data(db_session, "t1", hop="last")
         assert data == []
 
+    def test_timeline_uses_rollups_for_older_window(self, db_session):
+        """Older ranges include hourly rollup points."""
+        _make_target(db_session)
+        old_bucket = datetime.utcnow() - timedelta(days=2)
+        db_session.add(
+            SampleHourly(
+                target_id="t1",
+                hop_number=1,
+                bucket_start=old_bucket.replace(minute=0, second=0, microsecond=0),
+                sample_count=10,
+                timeout_count=0,
+                avg_rtt_ms=12.3,
+                min_rtt_ms=10.1,
+                max_rtt_ms=20.2,
+            )
+        )
+        db_session.commit()
+        start = old_bucket - timedelta(hours=1)
+        end = old_bucket + timedelta(hours=1)
+        data = get_timeline_data(db_session, "t1", hop="1", start=start, end=end)
+        assert len(data) >= 1
+
 
 class TestSummary:
     """get_summary."""
@@ -268,3 +293,50 @@ class TestAlertHelpers:
         event = record_alert_event(db_session, a, 12.0, "test event")
         assert event.metric_value == 12.0
         assert event.alert_id == "ae1"
+
+
+class TestMaintenanceHelpers:
+    """Rollup, retention, and DNS backfill helpers."""
+
+    def test_backfill_dns_for_ip(self, db_session):
+        _make_target(db_session)
+        now = datetime.utcnow()
+        store_sample(
+            db_session,
+            [
+                Sample(
+                    target_id="t1",
+                    sampled_at=now,
+                    hop_number=1,
+                    ip="10.0.0.1",
+                    dns=None,
+                    rtt_ms=11.0,
+                    is_timeout=False,
+                )
+            ],
+        )
+        changed = backfill_dns_for_ip(db_session, "10.0.0.1", "router.local")
+        db_session.commit()
+        assert changed == 1
+
+    def test_rollup_and_delete_old_samples(self, db_session):
+        _make_target(db_session)
+        old_ts = datetime.utcnow() - timedelta(days=3)
+        store_sample(
+            db_session,
+            [
+                Sample(
+                    target_id="t1",
+                    sampled_at=old_ts,
+                    hop_number=1,
+                    ip="10.0.0.1",
+                    dns=None,
+                    rtt_ms=11.0,
+                    is_timeout=False,
+                )
+            ],
+        )
+        rolled = aggregate_hourly_rollups(db_session, older_than_hours=24)
+        assert rolled >= 1
+        deleted = delete_raw_samples_older_than(db_session, days=1)
+        assert deleted >= 1

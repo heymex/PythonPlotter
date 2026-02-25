@@ -6,6 +6,7 @@ WebSocket live-feed endpoint, and manages the APScheduler lifecycle.
 
 import asyncio
 import logging
+import socket
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -19,13 +20,14 @@ from pingwatcher.api.sessions import router as sessions_router
 from pingwatcher.api.targets import router as targets_router
 from pingwatcher.config import get_settings
 from pingwatcher.db.models import SessionLocal, init_db
-from pingwatcher.db.queries import list_targets
+from pingwatcher.db.queries import get_summary, list_targets
 from pingwatcher.engine.scheduler import (
     latest_results,
     shutdown_scheduler,
     start_monitoring,
     start_scheduler,
     ws_subscribers,
+    ws_summary_subscribers,
 )
 
 logger = logging.getLogger(__name__)
@@ -139,6 +141,34 @@ async def ws_live_feed(websocket: WebSocket, target_id: str):
         ws_subscribers.get(target_id, set()).discard(queue)
 
 
+@app.websocket("/ws/summary")
+async def ws_summary_feed(websocket: WebSocket):
+    """Stream summary-row updates for all active targets."""
+    await websocket.accept()
+    queue: asyncio.Queue = asyncio.Queue()
+    ws_summary_subscribers.add(queue)
+    try:
+        # Push an initial snapshot for quick UI paint.
+        db = SessionLocal()
+        try:
+            await websocket.send_json(
+                {
+                    "type": "summary_snapshot",
+                    "rows": get_summary(db),
+                }
+            )
+        finally:
+            db.close()
+
+        while True:
+            payload = await queue.get()
+            await websocket.send_text(payload)
+    except WebSocketDisconnect:
+        logger.debug("Summary WebSocket client disconnected")
+    finally:
+        ws_summary_subscribers.discard(queue)
+
+
 # ---------------------------------------------------------------------------
 # Frontend catch-all
 # ---------------------------------------------------------------------------
@@ -160,12 +190,59 @@ def main() -> None:
     import uvicorn
 
     cfg = get_settings()
+    port = _choose_startup_port(cfg.host, cfg.port)
+    if port != cfg.port:
+        logger.warning(
+            "Port %s is in use; starting PingWatcher on port %s instead",
+            cfg.port,
+            port,
+        )
     uvicorn.run(
         "pingwatcher.main:app",
         host=cfg.host,
-        port=cfg.port,
+        port=port,
         log_level=cfg.log_level.lower(),
         reload=False,
+    )
+
+
+def _is_port_available(host: str, port: int) -> bool:
+    """Return ``True`` when a host/port can be bound by this process."""
+    try:
+        addrinfo = socket.getaddrinfo(
+            host,
+            port,
+            socket.AF_UNSPEC,
+            socket.SOCK_STREAM,
+            0,
+            socket.AI_PASSIVE,
+        )
+    except socket.gaierror:
+        return False
+
+    for family, socktype, proto, _canon, sockaddr in addrinfo:
+        with socket.socket(family, socktype, proto) as sock:
+            try:
+                sock.bind(sockaddr)
+            except OSError:
+                return False
+    return True
+
+
+def _choose_startup_port(host: str, preferred_port: int, search_range: int = 20) -> int:
+    """Pick ``preferred_port`` or the next available port in range.
+
+    Args:
+        host: Configured bind host.
+        preferred_port: Initial preferred port.
+        search_range: How many incremental ports to try after preferred.
+    """
+    for offset in range(search_range + 1):
+        candidate = preferred_port + offset
+        if _is_port_available(host, candidate):
+            return candidate
+    raise RuntimeError(
+        f"No available port found in range {preferred_port}-{preferred_port + search_range}"
     )
 
 

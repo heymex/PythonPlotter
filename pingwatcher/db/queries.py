@@ -5,7 +5,8 @@ caller controls transaction scope (typically injected via FastAPI's
 ``Depends(get_db)``).
 """
 
-from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from itertools import groupby
@@ -13,11 +14,13 @@ from itertools import groupby
 from sqlalchemy import desc, distinct, func, text
 from sqlalchemy.orm import Session
 
+from pingwatcher.config import get_settings
 from pingwatcher.db.models import (
     Alert,
     AlertHistory,
     RouteChange,
     Sample,
+    SampleHourly,
     Target,
 )
 
@@ -255,40 +258,71 @@ def get_timeline_data(
         ``is_timeout`` suitable for Plotly consumption.
     """
     if hop == "last":
-        max_hop_row = (
+        max_hop_raw = (
             db.query(func.max(Sample.hop_number))
             .filter(Sample.target_id == target_id)
             .scalar()
         )
-        if max_hop_row is None:
+        max_hop_rollup = (
+            db.query(func.max(SampleHourly.hop_number))
+            .filter(SampleHourly.target_id == target_id)
+            .scalar()
+        )
+        candidates = [h for h in (max_hop_raw, max_hop_rollup) if h is not None]
+        if not candidates:
             return []
-        hop_number = max_hop_row
+        hop_number = max(candidates)
     else:
         hop_number = int(hop)
 
+    cfg = get_settings()
+    cutoff = datetime.utcnow() - timedelta(hours=cfg.rollup_after_hours)
+    start_eff = start
+    end_eff = end or datetime.utcnow()
+    points: list[dict[str, Any]] = []
+
+    # Rollup segment for older windows.
+    if cfg.enable_rollups and start_eff is not None and start_eff < cutoff:
+        rollup_end = min(end_eff, cutoff)
+        rollups_q = db.query(SampleHourly).filter(
+            SampleHourly.target_id == target_id,
+            SampleHourly.hop_number == hop_number,
+            SampleHourly.bucket_start >= start_eff,
+            SampleHourly.bucket_start <= rollup_end,
+        )
+        rollups = rollups_q.order_by(SampleHourly.bucket_start).all()
+        points.extend(
+            {
+                "timestamp": r.bucket_start.isoformat() if r.bucket_start else None,
+                "rtt_ms": r.avg_rtt_ms,
+                "is_timeout": bool(r.sample_count and r.timeout_count == r.sample_count),
+            }
+            for r in rollups
+        )
+        start_eff = cutoff
+
+    # Raw segment for recent windows.
     query = db.query(Sample).filter(
         Sample.target_id == target_id,
         Sample.hop_number == hop_number,
     )
-    if start:
-        query = query.filter(Sample.sampled_at >= start)
-    if end:
-        query = query.filter(Sample.sampled_at <= end)
+    if start_eff:
+        query = query.filter(Sample.sampled_at >= start_eff)
+    if end_eff:
+        query = query.filter(Sample.sampled_at <= end_eff)
 
-    if limit is not None:
-        rows = query.order_by(desc(Sample.sampled_at)).limit(limit).all()
-        rows.reverse()
-    else:
-        rows = query.order_by(Sample.sampled_at).all()
-
-    return [
+    raw_rows = query.order_by(Sample.sampled_at).all()
+    points.extend(
         {
             "timestamp": r.sampled_at.isoformat() if r.sampled_at else None,
             "rtt_ms": r.rtt_ms,
             "is_timeout": r.is_timeout,
         }
-        for r in rows
-    ]
+        for r in raw_rows
+    )
+    if limit is not None and len(points) > limit:
+        points = points[-limit:]
+    return points
 
 
 def get_summary(db: Session, focus_n: int = 10) -> list[dict[str, Any]]:
@@ -306,33 +340,40 @@ def get_summary(db: Session, focus_n: int = 10) -> list[dict[str, Any]]:
     summaries: list[dict[str, Any]] = []
 
     for t in targets:
-        max_hop = (
-            db.query(func.max(Sample.hop_number))
-            .filter(Sample.target_id == t.id)
-            .scalar()
-        )
-        if max_hop is None:
-            stats: dict[str, Any] = {
-                "avg_ms": None,
-                "min_ms": None,
-                "max_ms": None,
-                "cur_ms": None,
-                "packet_loss_pct": 0.0,
-            }
-        else:
-            stats = get_hop_stats(db, t.id, max_hop, focus_n)
-
-        summaries.append(
-            {
-                "target_id": t.id,
-                "host": t.host,
-                "label": t.label,
-                "active": t.active,
-                **{k: v for k, v in stats.items() if k != "hop"},
-            }
-        )
+        row = get_target_summary(db, t.id, focus_n=focus_n)
+        if row is not None:
+            summaries.append(row)
 
     return summaries
+
+
+def get_target_summary(db: Session, target_id: str, focus_n: int = 10) -> Optional[dict[str, Any]]:
+    """Build one summary row for a specific target."""
+    target = get_target(db, target_id)
+    if target is None:
+        return None
+    max_hop = (
+        db.query(func.max(Sample.hop_number))
+        .filter(Sample.target_id == target.id)
+        .scalar()
+    )
+    if max_hop is None:
+        stats: dict[str, Any] = {
+            "avg_ms": None,
+            "min_ms": None,
+            "max_ms": None,
+            "cur_ms": None,
+            "packet_loss_pct": 0.0,
+        }
+    else:
+        stats = get_hop_stats(db, target.id, max_hop, focus_n)
+    return {
+        "target_id": target.id,
+        "host": target.host,
+        "label": target.label,
+        "active": target.active,
+        **{k: v for k, v in stats.items() if k != "hop"},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +462,93 @@ def get_route_changes(db: Session, target_id: str) -> list[dict[str, Any]]:
         }
         for r in rows
     ]
+
+
+def backfill_dns_for_ip(db: Session, ip: str, dns_name: str, limit: int = 5000) -> int:
+    """Backfill missing DNS values for a known IP address."""
+    rows = (
+        db.query(Sample)
+        .filter(
+            Sample.ip == ip,
+            (Sample.dns.is_(None) | (Sample.dns == "")),
+        )
+        .order_by(desc(Sample.sampled_at))
+        .limit(limit)
+        .all()
+    )
+    for row in rows:
+        row.dns = dns_name
+    return len(rows)
+
+
+def aggregate_hourly_rollups(db: Session, older_than_hours: int = 24) -> int:
+    """Aggregate raw samples into hourly rollup rows."""
+    cutoff = datetime.utcnow() - timedelta(hours=older_than_hours)
+    rows = (
+        db.query(Sample)
+        .filter(Sample.sampled_at < cutoff)
+        .order_by(Sample.target_id, Sample.hop_number, Sample.sampled_at)
+        .all()
+    )
+    if not rows:
+        return 0
+
+    grouped: dict[tuple[str, int, datetime], dict[str, Any]] = defaultdict(
+        lambda: {"sample_count": 0, "timeout_count": 0, "rtts": []}
+    )
+    for row in rows:
+        bucket_start = row.sampled_at.replace(minute=0, second=0, microsecond=0)
+        key = (row.target_id, row.hop_number, bucket_start)
+        agg = grouped[key]
+        agg["sample_count"] += 1
+        if row.is_timeout:
+            agg["timeout_count"] += 1
+        elif row.rtt_ms is not None:
+            agg["rtts"].append(row.rtt_ms)
+
+    for (target_id, hop_number, bucket_start), agg in grouped.items():
+        existing = (
+            db.query(SampleHourly)
+            .filter(
+                SampleHourly.target_id == target_id,
+                SampleHourly.hop_number == hop_number,
+                SampleHourly.bucket_start == bucket_start,
+            )
+            .first()
+        )
+        valid = agg["rtts"]
+        avg_rtt = (sum(valid) / len(valid)) if valid else None
+        min_rtt = min(valid) if valid else None
+        max_rtt = max(valid) if valid else None
+        if existing is None:
+            db.add(
+                SampleHourly(
+                    target_id=target_id,
+                    hop_number=hop_number,
+                    bucket_start=bucket_start,
+                    sample_count=agg["sample_count"],
+                    timeout_count=agg["timeout_count"],
+                    avg_rtt_ms=avg_rtt,
+                    min_rtt_ms=min_rtt,
+                    max_rtt_ms=max_rtt,
+                )
+            )
+        else:
+            existing.sample_count = agg["sample_count"]
+            existing.timeout_count = agg["timeout_count"]
+            existing.avg_rtt_ms = avg_rtt
+            existing.min_rtt_ms = min_rtt
+            existing.max_rtt_ms = max_rtt
+    db.commit()
+    return len(grouped)
+
+
+def delete_raw_samples_older_than(db: Session, days: int = 14) -> int:
+    """Delete raw samples older than the retention window."""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    deleted = db.query(Sample).filter(Sample.sampled_at < cutoff).delete(synchronize_session=False)
+    db.commit()
+    return int(deleted)
 
 
 # ---------------------------------------------------------------------------

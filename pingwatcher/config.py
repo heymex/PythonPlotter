@@ -36,6 +36,16 @@ class Settings(BaseSettings):
     default_inter_packet_delay: float = 0.025
     default_focus: int = 10
     default_timeline_points: int = 600
+    probe_engine: str = "auto"
+    scapy_enabled: bool = True
+    enable_dns_enrichment_worker: bool = True
+    dns_enrichment_batch_size: int = 200
+    dns_enrichment_tick_seconds: float = 1.0
+    raw_retention_days: int = 14
+    rollup_after_hours: int = 24
+    maintenance_interval_minutes: int = 30
+    enable_rollups: bool = True
+    enable_ws_summary_push: bool = True
     log_level: str = "INFO"
     host: str = "0.0.0.0"
     port: int = 8000

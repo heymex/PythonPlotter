@@ -108,6 +108,27 @@ class Sample(Base):
     )
 
 
+class SampleHourly(Base):
+    """Hourly rollup of per-hop sample statistics."""
+
+    __tablename__ = "samples_hourly"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    target_id = Column(String, ForeignKey("targets.id", ondelete="CASCADE"), nullable=False)
+    hop_number = Column(Integer, nullable=False)
+    bucket_start = Column(DateTime, nullable=False)
+    sample_count = Column(Integer, nullable=False, default=0)
+    timeout_count = Column(Integer, nullable=False, default=0)
+    avg_rtt_ms = Column(Float, nullable=True)
+    min_rtt_ms = Column(Float, nullable=True)
+    max_rtt_ms = Column(Float, nullable=True)
+
+    __table_args__ = (
+        Index("idx_samples_hourly_target_hop_bucket", "target_id", "hop_number", "bucket_start"),
+        Index("idx_samples_hourly_target_bucket", "target_id", "bucket_start"),
+    )
+
+
 class RouteChange(Base):
     """Record of a detected route change for a target.
 

@@ -5,6 +5,8 @@ root privileges.
 """
 
 import subprocess
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,6 +17,7 @@ from pingwatcher.engine.tracer import (
     _parse_traceroute_output,
     icmp_traceroute,
     resolve_target,
+    scapy_icmp_traceroute,
     system_traceroute,
 )
 
@@ -179,3 +182,46 @@ class TestResolveTarget:
     def test_passthrough_ip(self, mock_dns):
         """IP addresses pass through unchanged."""
         assert resolve_target("8.8.8.8") == "8.8.8.8"
+
+
+class TestScapyTraceroute:
+    """Verify the Scapy batch traceroute path."""
+
+    @patch("pingwatcher.engine.tracer.resolve_target", return_value="8.8.8.8")
+    def test_maps_answers_by_ttl(self, _mock_resolve):
+        """Answered packets are converted to ordered hop rows."""
+
+        class _Pkt:
+            def __init__(self, ttl, src=None, sent_time=0.0, recv_time=0.0):
+                self.ttl = ttl
+                self.src = src
+                self.sent_time = sent_time
+                self.time = recv_time
+
+        class _FakeIP:
+            def __init__(self, dst, ttl):
+                self.dst = dst
+                self.ttl = ttl
+
+            def __truediv__(self, _other):
+                return self
+
+        fake_scapy_all = types.SimpleNamespace(
+            IP=lambda dst, ttl: _FakeIP(dst, ttl),
+            ICMP=lambda: object(),
+            sr=lambda _pkts, timeout, retry, verbose: (
+                [
+                    (_Pkt(1, sent_time=1.0), _Pkt(1, src="10.0.0.1", recv_time=1.002)),
+                    (_Pkt(2, sent_time=1.0), _Pkt(2, src="8.8.8.8", recv_time=1.010)),
+                ],
+                [],
+            ),
+        )
+        fake_scapy = types.SimpleNamespace(all=fake_scapy_all)
+
+        with patch.dict(sys.modules, {"scapy": fake_scapy, "scapy.all": fake_scapy_all}):
+            hops = scapy_icmp_traceroute("8.8.8.8", max_hops=5, timeout=1.0)
+
+        assert len(hops) == 2
+        assert hops[0]["ip"] == "10.0.0.1"
+        assert hops[1]["ip"] == "8.8.8.8"

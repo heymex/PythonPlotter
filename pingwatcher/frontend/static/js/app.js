@@ -19,11 +19,10 @@ let activeTargetId = null;
 
 /** @type {WebSocket|null} Active WebSocket connection. */
 let ws = null;
-
-/** @type {number|null} Polling interval handle for summary view. */
-let summaryInterval = null;
-/** @type {Map<number, Array<{ip: string|null, dns: string|null, rtt_ms: number|null, is_timeout: boolean}>>} */
-let liveHopHistory = new Map();
+/** @type {WebSocket|null} Summary view WebSocket. */
+let summaryWs = null;
+/** @type {Map<string, Object>} Latest summary rows keyed by target ID. */
+let summaryRows = new Map();
 
 const DEFAULT_TIMELINE_POINTS = 600;
 
@@ -75,9 +74,9 @@ $tabs.forEach((btn) => {
 
     if (view === "summary") {
       refreshSummary();
-      startSummaryPolling();
+      connectSummaryWebSocket();
     } else {
-      stopSummaryPolling();
+      closeSummaryWebSocket();
       if (activeTargetId) {
         if (view === "trace") refreshTrace();
         if (view === "timeline") refreshTimeline();
@@ -196,7 +195,6 @@ async function deleteTarget(id) {
  */
 function selectTarget(id) {
   activeTargetId = id;
-  liveHopHistory = new Map();
   renderPills();
   refreshTrace();
   refreshTimeline();
@@ -252,30 +250,8 @@ async function refreshSummary() {
 }
 
 $focus.addEventListener("change", () => {
-  if (liveHopHistory.size > 0) {
-    renderTraceGraph(buildLiveTraceStats());
-    return;
-  }
   refreshTrace();
 });
-
-// ---------------------------------------------------------------------------
-// Summary polling
-// ---------------------------------------------------------------------------
-
-/** Start auto-refreshing the summary view every 5 seconds. */
-function startSummaryPolling() {
-  stopSummaryPolling();
-  summaryInterval = setInterval(refreshSummary, 5000);
-}
-
-/** Stop auto-refreshing the summary view. */
-function stopSummaryPolling() {
-  if (summaryInterval) {
-    clearInterval(summaryInterval);
-    summaryInterval = null;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // WebSocket
@@ -294,25 +270,26 @@ function connectWebSocket(targetId) {
   ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
-      if (data.target_id === activeTargetId) {
-        const sampledAt = data.sampled_at || new Date().toISOString();
-        ingestLiveSample(data.hops || []);
-
-        const activeView = document.querySelector(".tab-btn.active")?.dataset.view;
-        if (activeView === "trace") {
-          renderTraceGraph(buildLiveTraceStats());
+      if (data.target_id !== activeTargetId) return;
+      const sampledAt = data.sampled_at || new Date().toISOString();
+      const activeView = document.querySelector(".tab-btn.active")?.dataset.view;
+      if (activeView === "trace") {
+        if (Array.isArray(data.hop_stats)) {
+          renderTraceGraph(data.hop_stats);
+        } else {
+          refreshTrace();
         }
-        if (activeView === "timeline") {
-          const finalHop = getFinalHop(data.hops || []);
-          appendTimelinePoint(
-            {
-              timestamp: sampledAt,
-              rtt_ms: finalHop?.rtt_ms ?? null,
-              is_timeout: finalHop ? !!finalHop.is_timeout : true,
-            },
-            DEFAULT_TIMELINE_POINTS
-          );
-        }
+      }
+      if (activeView === "timeline") {
+        const finalHop = getFinalHop(data.hops || []);
+        appendTimelinePoint(
+          {
+            timestamp: sampledAt,
+            rtt_ms: finalHop?.rtt_ms ?? null,
+            is_timeout: finalHop ? !!finalHop.is_timeout : true,
+          },
+          DEFAULT_TIMELINE_POINTS
+        );
       }
     } catch (err) {
       console.error("WebSocket parse error:", err);
@@ -325,64 +302,6 @@ function connectWebSocket(targetId) {
       if (activeTargetId === targetId) connectWebSocket(targetId);
     }, 3000);
   };
-}
-
-/**
- * Add one live traceroute sample to the in-memory hop history.
- *
- * @param {Array<{hop:number, ip:string|null, dns:string|null, rtt_ms:number|null, is_timeout:boolean}>} hops
- */
-function ingestLiveSample(hops) {
-  for (const hop of hops) {
-    if (!hop || hop.hop === undefined || hop.hop === null) continue;
-    const hopNum = Number(hop.hop);
-    const rows = liveHopHistory.get(hopNum) || [];
-    rows.push({
-      ip: hop.ip ?? null,
-      dns: hop.dns ?? null,
-      rtt_ms: hop.rtt_ms ?? null,
-      is_timeout: !!hop.is_timeout,
-    });
-    if (rows.length > 200) rows.splice(0, rows.length - 200);
-    liveHopHistory.set(hopNum, rows);
-  }
-}
-
-/**
- * Build trace-table stats from recent live samples.
- *
- * @returns {Array<Object>}
- */
-function buildLiveTraceStats() {
-  const focus = parseInt($focus.value, 10) || 10;
-  const hopNums = Array.from(liveHopHistory.keys()).sort((a, b) => a - b);
-  return hopNums.map((hopNum) => {
-    const rows = liveHopHistory.get(hopNum) || [];
-    const windowRows = rows.slice(-focus);
-    const latest = windowRows[windowRows.length - 1] || {};
-    const valid = windowRows
-      .filter((r) => !r.is_timeout && r.rtt_ms !== null && r.rtt_ms !== undefined)
-      .map((r) => Number(r.rtt_ms));
-    const lost = windowRows.filter((r) => r.is_timeout).length;
-    const total = windowRows.length || 1;
-    const avg = valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : null;
-    const min = valid.length ? Math.min(...valid) : null;
-    const max = valid.length ? Math.max(...valid) : null;
-    const cur = latest.is_timeout || latest.rtt_ms === null || latest.rtt_ms === undefined
-      ? null
-      : Number(latest.rtt_ms);
-
-    return {
-      hop: hopNum,
-      ip: latest.ip ?? null,
-      dns: latest.dns ?? null,
-      avg_ms: avg !== null ? Number(avg.toFixed(2)) : null,
-      min_ms: min !== null ? Number(min.toFixed(2)) : null,
-      max_ms: max !== null ? Number(max.toFixed(2)) : null,
-      cur_ms: cur !== null ? Number(cur.toFixed(2)) : null,
-      packet_loss_pct: Number(((lost / total) * 100).toFixed(1)),
-    };
-  });
 }
 
 /**
@@ -402,6 +321,43 @@ function closeWebSocket() {
     ws.onclose = null;
     ws.close();
     ws = null;
+  }
+}
+
+/** Open/maintain summary updates WebSocket. */
+function connectSummaryWebSocket() {
+  closeSummaryWebSocket();
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  summaryWs = new WebSocket(`${protocol}//${location.host}/ws/summary`);
+  summaryWs.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.type === "summary_snapshot" && Array.isArray(data.rows)) {
+        summaryRows = new Map(data.rows.map((row) => [row.target_id, row]));
+      } else if (data.type === "summary_update" && data.summary_row) {
+        summaryRows.set(data.target_id, data.summary_row);
+      } else {
+        return;
+      }
+      renderSummary(Array.from(summaryRows.values()));
+    } catch (err) {
+      console.error("Summary WS parse error:", err);
+    }
+  };
+  summaryWs.onclose = () => {
+    setTimeout(() => {
+      const activeView = document.querySelector(".tab-btn.active")?.dataset.view;
+      if (activeView === "summary") connectSummaryWebSocket();
+    }, 3000);
+  };
+}
+
+/** Close summary WebSocket and reset in-memory rows. */
+function closeSummaryWebSocket() {
+  if (summaryWs) {
+    summaryWs.onclose = null;
+    summaryWs.close();
+    summaryWs = null;
   }
 }
 

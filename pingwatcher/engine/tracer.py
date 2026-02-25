@@ -130,6 +130,7 @@ def _send_probe(
     target_ip: str,
     ttl: int,
     timeout: float,
+    resolve_dns_name: bool = True,
 ) -> dict:
     """Send a single ping probe at the given TTL and parse the result.
 
@@ -158,7 +159,7 @@ def _send_probe(
     parsed = _parse_ping_output(combined, target_ip)
     rtt = parsed["rtt_ms"]
 
-    dns_name = reverse_dns(parsed["ip"]) if parsed["ip"] else None
+    dns_name = reverse_dns(parsed["ip"]) if (resolve_dns_name and parsed["ip"]) else None
 
     return {
         "hop": ttl,
@@ -175,6 +176,7 @@ def icmp_traceroute(
     timeout: float = 3.0,
     inter_packet_delay: float = 0.025,
     max_consecutive_timeouts: int = 4,
+    resolve_dns_name: bool = True,
 ) -> list[dict]:
     """Run a single ICMP traceroute to *target* using per-hop pings.
 
@@ -197,7 +199,13 @@ def icmp_traceroute(
     consecutive_timeouts = 0
 
     for ttl in range(1, max_hops + 1):
-        result = _send_probe(target, target_ip, ttl, timeout)
+        result = _send_probe(
+            target,
+            target_ip,
+            ttl,
+            timeout,
+            resolve_dns_name=resolve_dns_name,
+        )
         hops.append(result)
         logger.debug("hop %d → %s  rtt=%s", ttl, result["ip"], result["rtt_ms"])
 
@@ -215,12 +223,74 @@ def icmp_traceroute(
     return hops
 
 
+def scapy_icmp_traceroute(
+    target: str,
+    max_hops: int = 30,
+    timeout: float = 3.0,
+    resolve_dns_name: bool = True,
+) -> list[dict]:
+    """Run a batched ICMP traceroute with Scapy.
+
+    Sends all TTL probes in one shot and maps responses back by TTL. This
+    collapses trace duration toward ``max(timeout)`` rather than summing
+    per-hop subprocess waits.
+    """
+    # Delay import so environments without Scapy can still use subprocess mode.
+    from scapy.all import ICMP, IP, sr  # type: ignore
+
+    target_ip = resolve_target(target)
+    packets = [IP(dst=target_ip, ttl=ttl) / ICMP() for ttl in range(1, max_hops + 1)]
+    answered, _unanswered = sr(
+        packets,
+        timeout=timeout,
+        retry=0,
+        verbose=False,
+    )
+
+    hops_by_ttl: dict[int, dict] = {
+        ttl: {
+            "hop": ttl,
+            "ip": None,
+            "dns": None,
+            "rtt_ms": None,
+            "is_timeout": True,
+        }
+        for ttl in range(1, max_hops + 1)
+    }
+
+    for sent_pkt, recv_pkt in answered:
+        ttl = int(getattr(sent_pkt, "ttl", 0))
+        if ttl <= 0 or ttl > max_hops:
+            continue
+        src_ip = getattr(recv_pkt, "src", None)
+        sent_time = getattr(sent_pkt, "sent_time", None)
+        recv_time = getattr(recv_pkt, "time", None)
+        rtt_ms = None
+        if sent_time is not None and recv_time is not None:
+            rtt_ms = round((float(recv_time) - float(sent_time)) * 1000.0, 2)
+
+        dns_name = reverse_dns(src_ip) if (resolve_dns_name and src_ip) else None
+        hops_by_ttl[ttl] = {
+            "hop": ttl,
+            "ip": src_ip,
+            "dns": dns_name,
+            "rtt_ms": rtt_ms,
+            "is_timeout": src_ip is None,
+        }
+
+    ordered = [hops_by_ttl[ttl] for ttl in range(1, max_hops + 1)]
+    for idx, hop in enumerate(ordered):
+        if hop["ip"] == target_ip:
+            return ordered[: idx + 1]
+    return ordered
+
+
 # ---------------------------------------------------------------------------
 # System-traceroute fallback
 # ---------------------------------------------------------------------------
 
 
-def _parse_traceroute_output(output: str) -> list[dict]:
+def _parse_traceroute_output(output: str, resolve_dns_name: bool = True) -> list[dict]:
     """Parse the textual output of ``traceroute -n -q 1``.
 
     Args:
@@ -240,7 +310,7 @@ def _parse_traceroute_output(output: str) -> list[dict]:
         rtt: Optional[float] = float(rtt_str) if rtt_str else None
         is_timeout = ip is None
 
-        dns_name = reverse_dns(ip) if ip else None
+        dns_name = reverse_dns(ip) if (resolve_dns_name and ip) else None
         hops.append(
             {
                 "hop": hop_num,
@@ -257,6 +327,7 @@ def system_traceroute(
     target: str,
     max_hops: int = 30,
     timeout: float = 3.0,
+    resolve_dns_name: bool = True,
 ) -> list[dict]:
     """Run the system ``traceroute`` binary and parse its output.
 
@@ -286,7 +357,7 @@ def system_traceroute(
             text=True,
             timeout=timeout * max_hops + 10,
         )
-        return _parse_traceroute_output(proc.stdout)
+        return _parse_traceroute_output(proc.stdout, resolve_dns_name=resolve_dns_name)
     except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
         logger.error("system traceroute failed: %s", exc)
         return []

@@ -1,9 +1,4 @@
-"""APScheduler integration for continuous traceroute sampling.
-
-Each monitored :class:`~pingwatcher.db.models.Target` gets its own
-interval-triggered job.  Collected samples are persisted through the
-query helpers and broadcast to connected WebSocket clients.
-"""
+"""APScheduler integration for continuous traceroute sampling."""
 
 import json
 import logging
@@ -12,22 +7,31 @@ import threading
 from datetime import datetime
 from typing import Optional
 
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from pingwatcher.config import get_settings
 from pingwatcher.alerts.conditions import evaluate_alerts
+from pingwatcher.config import get_settings
 from pingwatcher.db.models import Sample, SessionLocal, Target
 from pingwatcher.db.queries import (
+    aggregate_hourly_rollups,
+    backfill_dns_for_ip,
+    delete_raw_samples_older_than,
     get_all_hop_stats,
     get_last_known_route,
+    get_target_summary,
     record_route_change,
     store_sample,
 )
-from pingwatcher.engine.tracer import icmp_traceroute
+from pingwatcher.engine.dns import NO_PTR, reverse_dns
+from pingwatcher.engine.tracer import (
+    icmp_traceroute,
+    scapy_icmp_traceroute,
+    system_traceroute,
+)
 
 logger = logging.getLogger(__name__)
 
-scheduler = BackgroundScheduler(daemon=True)
+scheduler = AsyncIOScheduler()
 
 # In-memory dict of latest raw hop list per target for WebSocket push.
 # Keyed by target_id; value is the hop list from the most recent trace.
@@ -41,6 +45,7 @@ latest_hop_stats: dict[str, list[dict]] = {}
 # WebSocket subscribers (managed by the main app module).
 # Maps target_id → set of asyncio.Queue instances.
 ws_subscribers: dict[str, set] = {}
+ws_summary_subscribers: set = set()
 
 # Number of consecutive DNS resolution failures before disabling
 # monitoring for a target.
@@ -54,6 +59,10 @@ _target_run_locks: dict[str, threading.Lock] = {}
 # (needed to handle server restarts without missing the first-sample check).
 _last_known_routes: dict[str, list] = {}
 _route_cache_initialized: set[str] = set()
+_dns_pending_ips: set[str] = set()
+
+_DNS_JOB_ID = "__dns_enrichment__"
+_MAINTENANCE_JOB_ID = "__maintenance__"
 
 
 def _deactivate_target(target_id: str) -> None:
@@ -66,6 +75,53 @@ def _deactivate_target(target_id: str) -> None:
             db.commit()
     finally:
         db.close()
+
+
+def _queue_dns_enrichment(hops: list[dict]) -> None:
+    """Queue unresolved hop IPs for async DNS backfill."""
+    for hop in hops:
+        ip = hop.get("ip")
+        dns = hop.get("dns")
+        if ip and not dns:
+            _dns_pending_ips.add(ip)
+
+
+def _select_probe_engine(host: str, max_hops: int, timeout: float) -> list[dict]:
+    """Run traceroute using configured probe-engine strategy."""
+    cfg = get_settings()
+    mode = str(getattr(cfg, "probe_engine", "auto") or "auto").lower()
+
+    if mode in {"auto", "scapy"} and cfg.scapy_enabled:
+        try:
+            return scapy_icmp_traceroute(
+                host,
+                max_hops=max_hops,
+                timeout=timeout,
+                resolve_dns_name=False,
+            )
+        except Exception as exc:
+            if mode == "scapy":
+                logger.error("Scapy traceroute failed for %s: %s", host, exc)
+                return []
+            logger.debug("Scapy unavailable for %s; falling back: %s", host, exc)
+
+    # Fast one-shot subprocess fallback when Scapy is unavailable.
+    hops = system_traceroute(
+        host,
+        max_hops=max_hops,
+        timeout=timeout,
+        resolve_dns_name=False,
+    )
+    if hops:
+        return hops
+
+    return icmp_traceroute(
+        host,
+        max_hops=max_hops,
+        timeout=timeout,
+        inter_packet_delay=cfg.default_inter_packet_delay,
+        resolve_dns_name=False,
+    )
 
 
 def _collect_sample(target_id: str, host: str, max_hops: int, timeout: float) -> None:
@@ -91,12 +147,7 @@ def _collect_sample(target_id: str, host: str, max_hops: int, timeout: float) ->
     try:
         cfg = get_settings()
         try:
-            hops = icmp_traceroute(
-                host,
-                max_hops=max_hops,
-                timeout=timeout,
-                inter_packet_delay=cfg.default_inter_packet_delay,
-            )
+            hops = _select_probe_engine(host, max_hops=max_hops, timeout=timeout)
         except socket.gaierror as exc:
             failures = _dns_failures_by_target.get(target_id, 0) + 1
             _dns_failures_by_target[target_id] = failures
@@ -129,6 +180,7 @@ def _collect_sample(target_id: str, host: str, max_hops: int, timeout: float) ->
         now = datetime.utcnow()
         db = SessionLocal()
         all_stats = None
+        summary_row = None
         try:
             # --- Route-change detection (cached; DB only on first run) ---
             new_ips = [h["ip"] for h in hops]
@@ -162,6 +214,7 @@ def _collect_sample(target_id: str, host: str, max_hops: int, timeout: float) ->
                 for h in hops
             ]
             store_sample(db, samples)
+            _queue_dns_enrichment(hops)
 
             # Update route cache after the new sample is stored.
             _last_known_routes[target_id] = new_ips
@@ -186,6 +239,12 @@ def _collect_sample(target_id: str, host: str, max_hops: int, timeout: float) ->
                 )
             except Exception:
                 logger.exception("Alert evaluation failed for %s", target_id)
+
+            if cfg.enable_ws_summary_push:
+                try:
+                    summary_row = get_target_summary(db, target_id, focus_n=cfg.default_focus)
+                except Exception:
+                    logger.exception("Failed to build summary row for %s", target_id)
         finally:
             db.close()
 
@@ -193,7 +252,13 @@ def _collect_sample(target_id: str, host: str, max_hops: int, timeout: float) ->
         latest_results[target_id] = hops
 
         # Push to any connected WebSocket subscribers.
-        _notify_subscribers(target_id, hops, sampled_at=now.isoformat())
+        _notify_subscribers(
+            target_id,
+            hops,
+            sampled_at=now.isoformat(),
+            hop_stats=all_stats,
+            summary_row=summary_row,
+        )
     finally:
         lock.release()
 
@@ -202,6 +267,8 @@ def _notify_subscribers(
     target_id: str,
     hops: list[dict],
     sampled_at: Optional[str] = None,
+    hop_stats: Optional[list[dict]] = None,
+    summary_row: Optional[dict] = None,
 ) -> None:
     """Enqueue the latest hop data for all WebSocket subscribers.
 
@@ -210,9 +277,13 @@ def _notify_subscribers(
         hops: List of hop dictionaries from the most recent trace.
     """
     queues = ws_subscribers.get(target_id, set())
-    payload_data = {"target_id": target_id, "hops": hops}
+    payload_data = {"type": "target_sample", "target_id": target_id, "hops": hops}
     if sampled_at is not None:
         payload_data["sampled_at"] = sampled_at
+    if hop_stats is not None:
+        payload_data["hop_stats"] = hop_stats
+    if summary_row is not None:
+        payload_data["summary_row"] = summary_row
     payload = json.dumps(payload_data)
     dead: list = []
     for queue in queues:
@@ -222,6 +293,71 @@ def _notify_subscribers(
             dead.append(queue)
     for q in dead:
         queues.discard(q)
+
+    # Broadcast summary deltas to subscribers of the summary feed.
+    if summary_row is not None:
+        summary_payload = json.dumps(
+            {
+                "type": "summary_update",
+                "target_id": target_id,
+                "summary_row": summary_row,
+                "sampled_at": sampled_at,
+            }
+        )
+        dead_summary = []
+        for queue in ws_summary_subscribers:
+            try:
+                queue.put_nowait(summary_payload)
+            except Exception:
+                dead_summary.append(queue)
+        for q in dead_summary:
+            ws_summary_subscribers.discard(q)
+
+
+def _process_dns_enrichment() -> None:
+    """Resolve queued IPs and backfill DNS names asynchronously."""
+    cfg = get_settings()
+    if not cfg.enable_dns_enrichment_worker or not _dns_pending_ips:
+        return
+
+    batch: list[str] = []
+    for ip in list(_dns_pending_ips):
+        batch.append(ip)
+        _dns_pending_ips.discard(ip)
+        if len(batch) >= cfg.dns_enrichment_batch_size:
+            break
+    if not batch:
+        return
+
+    resolved: dict[str, str] = {}
+    for ip in batch:
+        name = reverse_dns(ip)
+        if name and name != NO_PTR:
+            resolved[ip] = name
+
+    if not resolved:
+        return
+
+    db = SessionLocal()
+    try:
+        for ip, dns_name in resolved.items():
+            backfill_dns_for_ip(db, ip=ip, dns_name=dns_name, limit=5000)
+        db.commit()
+    finally:
+        db.close()
+
+
+def _run_maintenance() -> None:
+    """Roll up and prune historical sample data."""
+    cfg = get_settings()
+    db = SessionLocal()
+    try:
+        if cfg.enable_rollups:
+            aggregate_hourly_rollups(db, older_than_hours=cfg.rollup_after_hours)
+        if cfg.raw_retention_days > 0:
+            delete_raw_samples_older_than(db, days=cfg.raw_retention_days)
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -289,9 +425,30 @@ def start_scheduler() -> None:
     Safe to call multiple times — will not restart an already-running
     scheduler.
     """
-    if not scheduler.running:
-        scheduler.start()
-        logger.info("Scheduler started")
+    if scheduler.running:
+        return
+    scheduler.start()
+    cfg = get_settings()
+    if cfg.enable_dns_enrichment_worker:
+        scheduler.add_job(
+            func=_process_dns_enrichment,
+            trigger="interval",
+            seconds=max(0.25, cfg.dns_enrichment_tick_seconds),
+            id=_DNS_JOB_ID,
+            coalesce=True,
+            max_instances=1,
+            replace_existing=True,
+        )
+    scheduler.add_job(
+        func=_run_maintenance,
+        trigger="interval",
+        minutes=max(1, cfg.maintenance_interval_minutes),
+        id=_MAINTENANCE_JOB_ID,
+        coalesce=True,
+        max_instances=1,
+        replace_existing=True,
+    )
+    logger.info("Scheduler started")
 
 
 def shutdown_scheduler() -> None:
