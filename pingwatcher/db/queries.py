@@ -148,6 +148,8 @@ def get_hop_stats(
     # Use the most recent row for IP / DNS display.
     latest = rows[0]
 
+    latest_cur = None if latest.is_timeout or latest.rtt_ms is None else round(latest.rtt_ms, 2)
+
     return {
         "hop": hop_number,
         "ip": latest.ip,
@@ -155,7 +157,7 @@ def get_hop_stats(
         "avg_ms": round(sum(valid_rtts) / len(valid_rtts), 2) if valid_rtts else None,
         "min_ms": round(min(valid_rtts), 2) if valid_rtts else None,
         "max_ms": round(max(valid_rtts), 2) if valid_rtts else None,
-        "cur_ms": round(valid_rtts[0], 2) if valid_rtts else None,
+        "cur_ms": latest_cur,
         "packet_loss_pct": round(lost / total * 100, 1) if total else 0.0,
     }
 
@@ -190,6 +192,7 @@ def get_timeline_data(
     hop: str = "last",
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
+    limit: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     """Retrieve time-series latency data for the timeline graph.
 
@@ -225,7 +228,11 @@ def get_timeline_data(
     if end:
         query = query.filter(Sample.sampled_at <= end)
 
-    rows = query.order_by(Sample.sampled_at).all()
+    if limit is not None:
+        rows = query.order_by(desc(Sample.sampled_at)).limit(limit).all()
+        rows.reverse()
+    else:
+        rows = query.order_by(Sample.sampled_at).all()
 
     return [
         {

@@ -9,6 +9,8 @@ const $chart = document.getElementById("timeline-chart");
 
 /** @type {boolean} Whether the chart has been initialised. */
 let chartInitialised = false;
+/** @type {Array<{timestamp: string, rtt_ms: number|null, is_timeout: boolean}>} */
+let timelinePoints = [];
 
 /**
  * Map a data point to a colour hex for the bar chart.
@@ -46,24 +48,25 @@ function themeColors() {
  * @param {Array<{timestamp: string, rtt_ms: number|null, is_timeout: boolean}>} data
  */
 export function renderTimeline(data) {
-  if (!data || data.length === 0) {
+  timelinePoints = Array.isArray(data) ? data.slice() : [];
+  if (timelinePoints.length === 0) {
     $chart.innerHTML = `<div class="empty-state" style="padding-top:6rem">
       No timeline data available yet.</div>`;
     chartInitialised = false;
     return;
   }
 
-  const timestamps = data.map((d) => d.timestamp);
-  const rtts = data.map((d) => (d.is_timeout ? null : d.rtt_ms));
-  const colours = data.map((d) => pointColor(d.rtt_ms, d.is_timeout));
+  const timestamps = timelinePoints.map((d) => d.timestamp);
+  const rtts = timelinePoints.map((d) => (d.is_timeout ? null : d.rtt_ms));
+  const colours = timelinePoints.map((d) => pointColor(d.rtt_ms, d.is_timeout));
 
   // For timeouts, show a fixed-height red bar so they're visible.
   const maxRtt = Math.max(...rtts.filter((r) => r !== null), 1);
-  const displayRtts = data.map((d) =>
+  const displayRtts = timelinePoints.map((d) =>
     d.is_timeout ? maxRtt * 1.1 : d.rtt_ms
   );
 
-  const hoverTexts = data.map((d) =>
+  const hoverTexts = timelinePoints.map((d) =>
     d.is_timeout
       ? "TIMEOUT"
       : d.rtt_ms !== null
@@ -111,9 +114,25 @@ export function renderTimeline(data) {
 }
 
 /**
+ * Append one point and rerender with a bounded history window.
+ *
+ * @param {{timestamp: string, rtt_ms: number|null, is_timeout: boolean}} point
+ * @param {number} maxPoints - Maximum points retained in memory and chart.
+ */
+export function appendTimelinePoint(point, maxPoints = 600) {
+  if (!point) return;
+  timelinePoints.push(point);
+  if (timelinePoints.length > maxPoints) {
+    timelinePoints = timelinePoints.slice(-maxPoints);
+  }
+  renderTimeline(timelinePoints);
+}
+
+/**
  * Remove the timeline chart.
  */
 export function clearTimeline() {
+  timelinePoints = [];
   if (chartInitialised) {
     Plotly.purge($chart);
     chartInitialised = false;

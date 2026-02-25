@@ -4,7 +4,7 @@
  */
 
 import { renderTraceGraph, clearTraceGraph } from "./trace-graph.js";
-import { renderTimeline, clearTimeline } from "./timeline-graph.js";
+import { appendTimelinePoint, renderTimeline, clearTimeline } from "./timeline-graph.js";
 import { renderSummary } from "./summary-view.js";
 
 // ---------------------------------------------------------------------------
@@ -22,6 +22,10 @@ let ws = null;
 
 /** @type {number|null} Polling interval handle for summary view. */
 let summaryInterval = null;
+/** @type {Map<number, Array<{ip: string|null, dns: string|null, rtt_ms: number|null, is_timeout: boolean}>>} */
+let liveHopHistory = new Map();
+
+const DEFAULT_TIMELINE_POINTS = 600;
 
 // ---------------------------------------------------------------------------
 // DOM references
@@ -192,6 +196,7 @@ async function deleteTarget(id) {
  */
 function selectTarget(id) {
   activeTargetId = id;
+  liveHopHistory = new Map();
   renderPills();
   refreshTrace();
   refreshTimeline();
@@ -223,7 +228,9 @@ async function refreshTrace() {
 async function refreshTimeline() {
   if (!activeTargetId) return;
   try {
-    const res = await fetch(`/api/targets/${activeTargetId}/timeline?hop=last`);
+    const res = await fetch(
+      `/api/targets/${activeTargetId}/timeline?hop=last&limit=${DEFAULT_TIMELINE_POINTS}`
+    );
     const data = await res.json();
     renderTimeline(data);
   } catch (err) {
@@ -244,7 +251,13 @@ async function refreshSummary() {
   }
 }
 
-$focus.addEventListener("change", refreshTrace);
+$focus.addEventListener("change", () => {
+  if (liveHopHistory.size > 0) {
+    renderTraceGraph(buildLiveTraceStats());
+    return;
+  }
+  refreshTrace();
+});
 
 // ---------------------------------------------------------------------------
 // Summary polling
@@ -282,10 +295,24 @@ function connectWebSocket(targetId) {
     try {
       const data = JSON.parse(event.data);
       if (data.target_id === activeTargetId) {
-        // Auto-refresh the active view.
+        const sampledAt = data.sampled_at || new Date().toISOString();
+        ingestLiveSample(data.hops || []);
+
         const activeView = document.querySelector(".tab-btn.active")?.dataset.view;
-        if (activeView === "trace") refreshTrace();
-        if (activeView === "timeline") refreshTimeline();
+        if (activeView === "trace") {
+          renderTraceGraph(buildLiveTraceStats());
+        }
+        if (activeView === "timeline") {
+          const finalHop = getFinalHop(data.hops || []);
+          appendTimelinePoint(
+            {
+              timestamp: sampledAt,
+              rtt_ms: finalHop?.rtt_ms ?? null,
+              is_timeout: finalHop ? !!finalHop.is_timeout : true,
+            },
+            DEFAULT_TIMELINE_POINTS
+          );
+        }
       }
     } catch (err) {
       console.error("WebSocket parse error:", err);
@@ -298,6 +325,75 @@ function connectWebSocket(targetId) {
       if (activeTargetId === targetId) connectWebSocket(targetId);
     }, 3000);
   };
+}
+
+/**
+ * Add one live traceroute sample to the in-memory hop history.
+ *
+ * @param {Array<{hop:number, ip:string|null, dns:string|null, rtt_ms:number|null, is_timeout:boolean}>} hops
+ */
+function ingestLiveSample(hops) {
+  for (const hop of hops) {
+    if (!hop || hop.hop === undefined || hop.hop === null) continue;
+    const hopNum = Number(hop.hop);
+    const rows = liveHopHistory.get(hopNum) || [];
+    rows.push({
+      ip: hop.ip ?? null,
+      dns: hop.dns ?? null,
+      rtt_ms: hop.rtt_ms ?? null,
+      is_timeout: !!hop.is_timeout,
+    });
+    if (rows.length > 200) rows.splice(0, rows.length - 200);
+    liveHopHistory.set(hopNum, rows);
+  }
+}
+
+/**
+ * Build trace-table stats from recent live samples.
+ *
+ * @returns {Array<Object>}
+ */
+function buildLiveTraceStats() {
+  const focus = parseInt($focus.value, 10) || 10;
+  const hopNums = Array.from(liveHopHistory.keys()).sort((a, b) => a - b);
+  return hopNums.map((hopNum) => {
+    const rows = liveHopHistory.get(hopNum) || [];
+    const windowRows = rows.slice(-focus);
+    const latest = windowRows[windowRows.length - 1] || {};
+    const valid = windowRows
+      .filter((r) => !r.is_timeout && r.rtt_ms !== null && r.rtt_ms !== undefined)
+      .map((r) => Number(r.rtt_ms));
+    const lost = windowRows.filter((r) => r.is_timeout).length;
+    const total = windowRows.length || 1;
+    const avg = valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : null;
+    const min = valid.length ? Math.min(...valid) : null;
+    const max = valid.length ? Math.max(...valid) : null;
+    const cur = latest.is_timeout || latest.rtt_ms === null || latest.rtt_ms === undefined
+      ? null
+      : Number(latest.rtt_ms);
+
+    return {
+      hop: hopNum,
+      ip: latest.ip ?? null,
+      dns: latest.dns ?? null,
+      avg_ms: avg !== null ? Number(avg.toFixed(2)) : null,
+      min_ms: min !== null ? Number(min.toFixed(2)) : null,
+      max_ms: max !== null ? Number(max.toFixed(2)) : null,
+      cur_ms: cur !== null ? Number(cur.toFixed(2)) : null,
+      packet_loss_pct: Number(((lost / total) * 100).toFixed(1)),
+    };
+  });
+}
+
+/**
+ * Return the highest-hop row from a traceroute sample.
+ *
+ * @param {Array<{hop:number}>} hops
+ * @returns {Object|null}
+ */
+function getFinalHop(hops) {
+  if (!Array.isArray(hops) || hops.length === 0) return null;
+  return hops.reduce((acc, row) => (row.hop > acc.hop ? row : acc), hops[0]);
 }
 
 /** Close the current WebSocket connection. */

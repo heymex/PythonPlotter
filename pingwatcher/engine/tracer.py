@@ -144,7 +144,6 @@ def _send_probe(
         ``is_timeout``.
     """
     cmd = _build_ping_cmd(target, ttl, timeout)
-    start = time.monotonic()
     try:
         proc = subprocess.run(
             cmd,
@@ -155,15 +154,9 @@ def _send_probe(
         combined = proc.stdout + "\n" + proc.stderr
     except subprocess.TimeoutExpired:
         combined = ""
-    elapsed = (time.monotonic() - start) * 1000  # ms
 
     parsed = _parse_ping_output(combined, target_ip)
-
-    # For intermediate hops the ping tool doesn't report RTT — use
-    # wall-clock elapsed time as a rough estimate.
     rtt = parsed["rtt_ms"]
-    if rtt is None and parsed["ip"] is not None:
-        rtt = round(elapsed, 2)
 
     dns_name = reverse_dns(parsed["ip"]) if parsed["ip"] else None
 
@@ -171,7 +164,7 @@ def _send_probe(
         "hop": ttl,
         "ip": parsed["ip"],
         "dns": dns_name,
-        "rtt_ms": rtt,
+        "rtt_ms": round(rtt, 2) if rtt is not None else None,
         "is_timeout": parsed["is_timeout"],
     }
 

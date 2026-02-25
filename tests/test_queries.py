@@ -124,6 +124,31 @@ class TestHopStats:
         stats = get_hop_stats(db_session, "t1", 1, focus_n=10)
         assert stats["packet_loss_pct"] == 50.0
 
+    def test_current_rtt_uses_latest_sample(self, db_session):
+        """cur_ms reflects the newest row, including timeout as None."""
+        _make_target(db_session)
+        now = datetime.utcnow()
+        samples = [
+            Sample(
+                target_id="t1",
+                sampled_at=now - timedelta(seconds=3),
+                hop_number=1,
+                rtt_ms=10.0,
+                is_timeout=False,
+            ),
+            Sample(
+                target_id="t1",
+                sampled_at=now,
+                hop_number=1,
+                rtt_ms=None,
+                is_timeout=True,
+            ),
+        ]
+        store_sample(db_session, samples)
+
+        stats = get_hop_stats(db_session, "t1", 1, focus_n=10)
+        assert stats["cur_ms"] is None
+
 
 class TestTimeline:
     """get_timeline_data."""
@@ -145,6 +170,15 @@ class TestTimeline:
 
         data = get_timeline_data(db_session, "t1", hop="1")
         assert len(data) == 4
+
+    def test_timeline_limit(self, db_session):
+        """Timeline honors the limit and preserves chronological order."""
+        _make_target(db_session)
+        _add_samples(db_session, "t1", hop_count=1, count=8)
+
+        data = get_timeline_data(db_session, "t1", hop="1", limit=3)
+        assert len(data) == 3
+        assert data[0]["timestamp"] <= data[1]["timestamp"] <= data[2]["timestamp"]
 
     def test_timeline_empty(self, db_session):
         """Timeline returns empty list when no data exists."""

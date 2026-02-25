@@ -10,6 +10,7 @@ import logging
 import socket
 import threading
 from datetime import datetime
+from typing import Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -147,12 +148,16 @@ def _collect_sample(target_id: str, host: str, max_hops: int, timeout: float) ->
         latest_results[target_id] = hops
 
         # Push to any connected WebSocket subscribers.
-        _notify_subscribers(target_id, hops)
+        _notify_subscribers(target_id, hops, sampled_at=now.isoformat())
     finally:
         lock.release()
 
 
-def _notify_subscribers(target_id: str, hops: list[dict]) -> None:
+def _notify_subscribers(
+    target_id: str,
+    hops: list[dict],
+    sampled_at: Optional[str] = None,
+) -> None:
     """Enqueue the latest hop data for all WebSocket subscribers.
 
     Args:
@@ -160,7 +165,10 @@ def _notify_subscribers(target_id: str, hops: list[dict]) -> None:
         hops: List of hop dictionaries from the most recent trace.
     """
     queues = ws_subscribers.get(target_id, set())
-    payload = json.dumps({"target_id": target_id, "hops": hops})
+    payload_data = {"target_id": target_id, "hops": hops}
+    if sampled_at is not None:
+        payload_data["sampled_at"] = sampled_at
+    payload = json.dumps(payload_data)
     dead: list = []
     for queue in queues:
         try:

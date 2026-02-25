@@ -60,6 +60,7 @@ def api_timeline(
     hop: str = Query(default="last", description="Hop number or 'last'"),
     start: Optional[str] = Query(default=None, description="ISO start timestamp"),
     end: Optional[str] = Query(default=None, description="ISO end timestamp"),
+    limit: Optional[int] = Query(default=None, ge=1, le=5000, description="Maximum number of points"),
     db: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
     """Return time-series latency data for the timeline graph.
@@ -80,9 +81,11 @@ def api_timeline(
     if get_target(db, target_id) is None:
         raise HTTPException(status_code=404, detail="Target not found")
 
+    cfg = get_settings()
     start_dt = datetime.fromisoformat(start) if start else None
     end_dt = datetime.fromisoformat(end) if end else None
-    return get_timeline_data(db, target_id, hop=hop, start=start_dt, end=end_dt)
+    n = limit if limit is not None else cfg.default_timeline_points
+    return get_timeline_data(db, target_id, hop=hop, start=start_dt, end=end_dt, limit=n)
 
 
 @router.get("/api/targets/{target_id}/route_changes")

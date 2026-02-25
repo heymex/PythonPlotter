@@ -84,6 +84,16 @@ class TestTimelineEndpoint:
         data = resp.json()
         assert len(data) == 4
 
+    def test_timeline_limit(self, client, db_engine):
+        """Supports limiting timeline points via query parameter."""
+        tid = _seed(client)
+        _insert_samples(db_engine, tid, hops=2, traces=10)
+
+        resp = client.get(f"/api/targets/{tid}/timeline?hop=last&limit=3")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 3
+
     def test_timeline_nonexistent_target(self, client):
         """Returns 404 for a missing target."""
         resp = client.get("/api/targets/fake/timeline")

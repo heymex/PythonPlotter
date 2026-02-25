@@ -31,6 +31,11 @@ class TestSettings:
         s = Settings()
         assert s.default_focus == 10
 
+    def test_default_timeline_points(self):
+        """Default timeline window should be 600 points."""
+        s = Settings()
+        assert s.default_timeline_points == 600
+
     def test_default_port(self):
         """Default server port should be 8000."""
         s = Settings()

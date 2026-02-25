@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     default_timeout: float = 3.0
     default_inter_packet_delay: float = 0.025
     default_focus: int = 10
+    default_timeline_points: int = 600
     log_level: str = "INFO"
     host: str = "0.0.0.0"
     port: int = 8000
