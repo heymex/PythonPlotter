@@ -322,6 +322,37 @@ sudo systemctl enable --now pingwatcher
 
 ---
 
+## Performance
+
+### Completed optimisations
+
+| Area | What changed | Impact |
+|---|---|---|
+| **Hop stats query** | `get_all_hop_stats` replaced N+1 per-hop queries with a single `ROW_NUMBER() OVER (PARTITION BY hop_number)` window-function query | 31 DB round-trips → 1 per stats fetch |
+| **Stats cache** | Scheduler writes computed hop stats to `latest_hop_stats` after every sample; `/hops` API returns a dict lookup for default-focus requests | Zero DB queries on the hot path |
+| **Route cache** | Last known hop-IP list stored in memory; `get_last_known_route` (2 sub-queries per sample) now runs only once per target after a server restart | Eliminates 2 queries per sample per target |
+| **Alert evaluation** | `evaluate_alerts` wired into the sample loop and receives already-computed stats; previously it was never called and would have issued its own 30-query loop | Alerts now fire; zero extra DB queries |
+
+### Known limitations vs PingPlotter Pro
+
+The following gaps represent the largest remaining performance and feature differences, roughly in order of impact:
+
+1. **Serial subprocess-per-hop probing (critical)** — Each hop TTL spawns a separate `ping` subprocess, run one at a time. A 30-hop trace with any timeouts can take far longer than the 2.5 s sample interval. PingPlotter sends all TTL probes concurrently via raw ICMP sockets. Fix: replace the subprocess engine with Scapy raw ICMP (`scapy.all.sr()`), requiring `CAP_NET_RAW` / root.
+
+2. **Concurrent TTL probing (critical)** — Even with the subprocess approach, probes could be fanned out in parallel (`ThreadPoolExecutor`) to collapse total trace time from `sum(timeouts)` to `max(timeout)`. This is an interim win before a full Scapy rewrite.
+
+3. **DNS blocks the probe loop (medium)** — Reverse DNS lookups for new IPs run synchronously inside the trace. A cold cache miss can stall the loop for several seconds. Fix: store `dns=None` immediately, enqueue IPs for background async enrichment.
+
+4. **No data retention / aggregation (medium)** — The `samples` table grows indefinitely. At 2.5 s intervals with 30 hops, one target generates ~1 M rows/day. Without purging, query performance degrades over weeks. Fix: scheduled cleanup job (configurable retention window) plus a pre-aggregated `samples_hourly` table for long-range timeline queries.
+
+5. **Thread pool scheduler for I/O-bound work (medium)** — APScheduler's `BackgroundScheduler` uses OS threads. All work is I/O-bound; switching to `AsyncScheduler` (APScheduler 4.x) and async traceroute eliminates thread-pool overhead and GIL contention across targets.
+
+6. **Summary dashboard REST polling (low)** — The summary view polls `GET /api/summary` every 5 s instead of using the existing WebSocket connection. Fix: push summary-level data through the WebSocket on each sample.
+
+7. **Frontend computes live stats in JS (low)** — Every WebSocket message triggers a full re-computation over up to 200 × 30 in-memory samples. The server already computes and caches these stats; the browser just needs to render them.
+
+---
+
 ## License
 
 This project is released under the [Unlicense](LICENSE) — public domain.
